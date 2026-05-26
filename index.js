@@ -11,6 +11,8 @@ const Groq = require('groq-sdk');
 const fs = require('fs');
 const axios = require('axios');
 const cron = require('node-cron');
+const { exec } = require('child_process');
+const path = require('path');
 require('dotenv').config();
 
 // Inisialisasi Groq
@@ -84,15 +86,18 @@ async function connectToWhatsApp() {
 
         const from = msg.key.remoteJid;
         const type = getContentType(msg.message);
+        const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
         
         let body = '';
         let isImage = false;
+        let isVideo = false;
 
         if (type === 'conversation') body = msg.message.conversation;
         else if (type === 'extendedTextMessage') body = msg.message.extendedTextMessage.text;
         else if (type === 'imageMessage') { body = msg.message.imageMessage.caption || ''; isImage = true; }
+        else if (type === 'videoMessage') { body = msg.message.videoMessage.caption || ''; isVideo = true; }
 
-        if (!body && !isImage) return;
+        if (!body && !isImage && !isVideo && !quoted) return;
 
         // Auto Downloader Detection
         if (body.match(/tiktok\.com|instagram\.com/i)) {
@@ -115,6 +120,7 @@ async function connectToWhatsApp() {
 - *.search [kueri]* : Cari info terbaru.
 
 *Tahap B (Utility):*
+- *.s / .sticker* : Buat stiker dari foto/video.
 - *.remind [HH:mm] [pesan]* : Pengingat.
 - *Kirim Link TikTok/IG* : Auto Download Video.
 
@@ -122,6 +128,47 @@ async function connectToWhatsApp() {
 - *.reset* : Hapus memori chat.
 - *.ping* : Cek status.`;
                     await sock.sendMessage(from, { text: menuText }, { quoted: msg });
+                    break;
+
+                case 's':
+                case 'sticker':
+                    const isQuotedImage = quoted?.imageMessage;
+                    const isQuotedVideo = quoted?.videoMessage;
+                    
+                    if (isImage || isVideo || isQuotedImage || isQuotedVideo) {
+                        await sock.sendMessage(from, { text: '_Sedang memproses stiker..._' });
+                        try {
+                            const mediaMsg = isQuotedImage ? quoted.imageMessage : (isQuotedVideo ? quoted.videoMessage : (isImage ? msg.message.imageMessage : msg.message.videoMessage));
+                            const mediaType = (isImage || isQuotedImage) ? 'image' : 'video';
+                            const buffer = await downloadMedia(mediaMsg, mediaType);
+                            
+                            const inputPath = path.join(__dirname, `tmp/input_${Date.now()}.${mediaType === 'image' ? 'jpg' : 'mp4'}`);
+                            const outputPath = path.join(__dirname, `tmp/output_${Date.now()}.webp`);
+                            
+                            if (!fs.existsSync(path.join(__dirname, 'tmp'))) fs.mkdirSync(path.join(__dirname, 'tmp'));
+                            fs.writeFileSync(inputPath, buffer);
+                            
+                            const ffmpegCmd = mediaType === 'image' 
+                                ? `ffmpeg -i ${inputPath} -vcodec libwebp -filter:v "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)',pad=512:512:(512-iw)/2:(512-ih)/2:color=white@0" -y ${outputPath}`
+                                : `ffmpeg -i ${inputPath} -vcodec libwebp -filter:v "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)',pad=512:512:(512-iw)/2:(512-ih)/2:color=white@0" -loop 0 -preset default -an -vsync 0 -s 512:512 -t 5 -y ${outputPath}`;
+
+                            exec(ffmpegCmd, async (err) => {
+                                if (err) {
+                                    console.error('FFmpeg Error:', err);
+                                    await sock.sendMessage(from, { text: '❌ Gagal mengonversi stiker.' });
+                                } else {
+                                    await sock.sendMessage(from, { sticker: fs.readFileSync(outputPath) }, { quoted: msg });
+                                }
+                                if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+                                if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+                            });
+                        } catch (e) {
+                            console.error('Sticker Error:', e);
+                            await sock.sendMessage(from, { text: '❌ Terjadi kesalahan saat membuat stiker.' });
+                        }
+                    } else {
+                        await sock.sendMessage(from, { text: 'Silakan kirim gambar/video dengan caption .s atau balas gambar/video dengan .s' });
+                    }
                     break;
 
                 case 'remind':
@@ -143,6 +190,10 @@ async function connectToWhatsApp() {
                     chatMemory[from] = []; saveMemory();
                     await sock.sendMessage(from, { text: 'Memori dibersihkan.' });
                     break;
+                
+                case 'ping':
+                    await sock.sendMessage(from, { text: 'Pong!' });
+                    break;
             }
         } else {
             if (isImage) {
@@ -150,7 +201,7 @@ async function connectToWhatsApp() {
                 const imageBuffer = await downloadMedia(msg.message.imageMessage, 'image');
                 const visionRes = await getGroqVisionResponse(from, body || 'Apa ini?', imageBuffer.toString('base64'));
                 await sock.sendMessage(from, { text: visionRes }, { quoted: msg });
-            } else {
+            } else if (body) {
                 const needsSearch = /kapan|berita|siapa|skor|harga|terbaru|hari ini/i.test(body);
                 await sock.sendMessage(from, { text: needsSearch ? '_Searching..._' : '_Typing..._' });
                 const res = needsSearch ? await getWebSearchResponse(from, body) : await getGroqResponse(from, body);
@@ -179,10 +230,7 @@ function startReminderCron(sock) {
 async function handleDownloader(sock, from, url, msg) {
     try {
         await sock.sendMessage(from, { text: '_Mendeteksi link, sedang mengunduh..._' });
-        // Menggunakan API Tiklydown dengan penanganan error lebih baik
         const res = await axios.get(`https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(url)}`);
-        
-        // Coba ambil URL video dari berbagai kemungkinan struktur JSON
         const videoUrl = res.data.video?.noWatermark || res.data.data?.videoUrl || res.data.result?.video || res.data.url;
         
         if (videoUrl) {
@@ -191,16 +239,14 @@ async function handleDownloader(sock, from, url, msg) {
                 caption: '✅ Berhasil diunduh!' 
             }, { quoted: msg });
         } else {
-            console.log('API Response Downloader:', JSON.stringify(res.data));
-            throw new Error('Video tidak ditemukan dalam respon API.');
+            throw new Error('Video tidak ditemukan.');
         }
     } catch (e) {
-        console.error('Downloader Error:', e.message);
         await sock.sendMessage(from, { text: `❌ Gagal download: ${e.message}` });
     }
 }
 
-// --- Core Helpers (Vision, Search, Chat) ---
+// --- Core Helpers ---
 async function downloadMedia(message, type) {
     try {
         const stream = await downloadContentFromMessage(message, type);
@@ -208,7 +254,6 @@ async function downloadMedia(message, type) {
         for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
         return buffer;
     } catch (e) {
-        console.error('Download Media Error:', e.message);
         throw e;
     }
 }
@@ -225,7 +270,6 @@ async function getGroqResponse(userId, text) {
         addMessageToHistory(userId, 'assistant', reply);
         return reply;
     } catch (e) { 
-        console.error('Groq API Error:', e.message);
         return `Error AI: ${e.message}`; 
     }
 }
@@ -247,7 +291,6 @@ async function getGroqVisionResponse(userId, text, base64Image) {
         addMessageToHistory(userId, 'assistant', reply);
         return reply;
     } catch (e) { 
-        console.error('Vision API Error:', e.message);
         return `❌ Gagal analisis gambar: ${e.message}`; 
     }
 }
