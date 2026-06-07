@@ -27,7 +27,7 @@ Pastikan Anda sudah menginstal:
 
 ### 2. Clone Repository
 ```bash
-git clone https://github.com/username/wa-groq-bot.git
+git clone https://github.com/RIDHOALFIWIJAYA/bot-wa.git
 cd wa-groq-bot
 ```
 
