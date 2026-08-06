@@ -104,7 +104,7 @@ async function connectToWhatsApp() {
         if (!body && !isImage && !isVideo && !quoted) return;
 
         // Auto Downloader Detection
-        if (body.match(/tiktok\.com|instagram\.com/i)) {
+        if (body.match(/tiktok\.com/i)) {
             return handleDownloader(sock, from, body, msg);
         }
 
@@ -126,7 +126,7 @@ async function connectToWhatsApp() {
 *Tahap B (Utility):*
 - *.s / .sticker* : Buat stiker dari foto/video.
 - *.remind [HH:mm] [pesan]* : Pengingat.
-- *Kirim Link TikTok/IG* : Auto Download Video.
+- *Kirim Link TikTok* : Auto Download Video.
 
 *Others:*
 - *.reset* : Hapus memori chat.
@@ -234,8 +234,8 @@ function startReminderCron(sock) {
 async function handleDownloader(sock, from, url, msg) {
     try {
         await sock.sendMessage(from, { text: '_Mendeteksi link, sedang mengunduh..._' });
-        const res = await axios.get(`https://api.tiklydown.eu.org/api/download?url=${encodeURIComponent(url)}`);
-        const videoUrl = res.data.video?.noWatermark || res.data.data?.videoUrl || res.data.result?.video || res.data.url;
+        const res = await axios.get(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`);
+        const videoUrl = res.data.data?.play || res.data.data?.wmplay;
         
         if (videoUrl) {
             await sock.sendMessage(from, { 
