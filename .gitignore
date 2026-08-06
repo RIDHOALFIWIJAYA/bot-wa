@@ -3,3 +3,5 @@ node_modules/
 auth_info_baileys/
 tmp/
 *.log
+memory.json
+reminder.json

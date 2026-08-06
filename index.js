@@ -3,7 +3,8 @@ const {
     useMultiFileAuthState, 
     DisconnectReason, 
     getContentType,
-    downloadContentFromMessage
+    downloadContentFromMessage,
+    fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const qrcode = require('qrcode-terminal');
@@ -55,7 +56,10 @@ async function connectToWhatsApp() {
 
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
+    const { version } = await fetchLatestBaileysVersion();
+
     const sock = makeWASocket({
+        version,
         auth: state,
         printQRInTerminal: true,
         logger: require('pino')({ level: 'silent' }),
@@ -71,7 +75,7 @@ async function connectToWhatsApp() {
         if (connection === 'close') {
             isConnecting = false;
             const shouldReconnect = (lastDisconnect.error instanceof Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Koneksi terputus. Mencoba hubungkan kembali:', shouldReconnect);
+            console.log('Koneksi terputus. Mencoba hubungkan kembali:', shouldReconnect, lastDisconnect?.error?.toString());
             if (shouldReconnect) setTimeout(() => connectToWhatsApp(), 5000);
         } else if (connection === 'open') {
             isConnecting = false;
@@ -263,7 +267,7 @@ async function getGroqResponse(userId, text) {
         const messages = [{ role: 'system', content: 'Asisten pintar.' }, ...(chatMemory[userId] || []), { role: 'user', content: text }];
         const res = await groq.chat.completions.create({ 
             messages, 
-            model: process.env.MODEL_NAME || 'llama3-8b-8192' 
+            model: process.env.MODEL_NAME || 'llama-3.1-8b-instant' 
         });
         const reply = res.choices[0].message.content;
         addMessageToHistory(userId, 'user', text);
@@ -284,7 +288,7 @@ async function getGroqVisionResponse(userId, text, base64Image) {
                     { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
                 ] 
             }],
-            model: 'llama-3.2-11b-vision-preview'
+            model: 'qwen/qwen3.6-27b'
         });
         const reply = res.choices[0].message.content;
         addMessageToHistory(userId, 'user', `[Gambar]: ${text}`);
@@ -301,7 +305,7 @@ async function getWebSearchResponse(userId, query) {
         const snippet = res.data.AbstractText || "Cari info terbaru...";
         const finalRes = await groq.chat.completions.create({
             messages: [{ role: 'user', content: `Data: ${snippet}\n\nJawab: ${query}` }],
-            model: process.env.MODEL_NAME || 'llama3-8b-8192'
+            model: process.env.MODEL_NAME || 'llama-3.1-8b-instant'
         });
         return finalRes.choices[0].message.content;
     } catch (e) { return 'Gagal search.'; }
