@@ -37,6 +37,9 @@ function loadJSON(filePath, defaultValue) {
 let chatMemory = loadJSON(MEMORY_FILE, {});
 let reminders = loadJSON(REMINDERS_FILE, []);
 
+// State menunggu teks untuk stiker (per pengirim)
+const pendingSticker = new Map();
+
 const saveMemory = () => fs.writeFileSync(MEMORY_FILE, JSON.stringify(chatMemory, null, 2));
 const saveReminders = () => fs.writeFileSync(REMINDERS_FILE, JSON.stringify(reminders, null, 2));
 
@@ -113,6 +116,19 @@ async function connectToWhatsApp() {
         const command = isCommand ? body.slice(prefix.length).trim().split(/ +/).shift().toLowerCase() : null;
         const args = body.trim().split(/ +/).slice(1);
 
+        // Jika sedang menunggu teks untuk stiker
+        if (pendingSticker.has(from)) {
+            if (isCommand || isImage || isVideo) {
+                clearTimeout(pendingSticker.get(from).timer);
+                pendingSticker.delete(from);
+            } else if (body) {
+                const pending = pendingSticker.get(from);
+                clearTimeout(pending.timer);
+                pendingSticker.delete(from);
+                return createStickerWithText(sock, from, pending.mediaMsg, body, pending.msg);
+            }
+        }
+
         if (isCommand) {
             switch (command) {
                 case 'menu':
@@ -124,7 +140,7 @@ async function connectToWhatsApp() {
 - *.search [kueri]* : Cari info terbaru.
 
 *Tahap B (Utility):*
-- *.s / .sticker* : Buat stiker dari foto/video.
+- *.s / .sticker* : Stiker dari foto (bisa + teks) / video.
 - *.remind [HH:mm] [pesan]* : Pengingat.
 - *Kirim Link TikTok* : Auto Download Video.
 
@@ -138,23 +154,31 @@ async function connectToWhatsApp() {
                 case 'sticker':
                     const isQuotedImage = quoted?.imageMessage;
                     const isQuotedVideo = quoted?.videoMessage;
-                    
-                    if (isImage || isVideo || isQuotedImage || isQuotedVideo) {
+
+                    if (isImage || isQuotedImage) {
+                        const mediaMsg = isQuotedImage ? quoted.imageMessage : msg.message.imageMessage;
+                        await sock.sendMessage(from, { text: '_✍️ Ketik teks yang mau ditambahkan ke stiker (60 detik)._' });
+                        if (pendingSticker.has(from)) clearTimeout(pendingSticker.get(from).timer);
+                        const timer = setTimeout(() => {
+                            if (pendingSticker.has(from)) {
+                                pendingSticker.delete(from);
+                                sock.sendMessage(from, { text: '⏰ Waktu habis. Stiker batal.' }).catch(() => {});
+                            }
+                        }, 60000);
+                        pendingSticker.set(from, { mediaMsg, msg, timer });
+                    } else if (isVideo || isQuotedVideo) {
                         await sock.sendMessage(from, { text: '_Sedang memproses stiker..._' });
                         try {
-                            const mediaMsg = isQuotedImage ? quoted.imageMessage : (isQuotedVideo ? quoted.videoMessage : (isImage ? msg.message.imageMessage : msg.message.videoMessage));
-                            const mediaType = (isImage || isQuotedImage) ? 'image' : 'video';
-                            const buffer = await downloadMedia(mediaMsg, mediaType);
-                            
-                            const inputPath = path.join(__dirname, `tmp/input_${Date.now()}.${mediaType === 'image' ? 'jpg' : 'mp4'}`);
+                            const mediaMsg = isQuotedVideo ? quoted.videoMessage : msg.message.videoMessage;
+                            const buffer = await downloadMedia(mediaMsg, 'video');
+
+                            const inputPath = path.join(__dirname, `tmp/input_${Date.now()}.mp4`);
                             const outputPath = path.join(__dirname, `tmp/output_${Date.now()}.webp`);
-                            
+
                             if (!fs.existsSync(path.join(__dirname, 'tmp'))) fs.mkdirSync(path.join(__dirname, 'tmp'));
                             fs.writeFileSync(inputPath, buffer);
-                            
-                            const ffmpegCmd = mediaType === 'image' 
-                                ? `ffmpeg -i ${inputPath} -vcodec libwebp -filter:v "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)',pad=512:512:(512-iw)/2:(512-ih)/2:color=white@0" -y ${outputPath}`
-                                : `ffmpeg -i ${inputPath} -vcodec libwebp -filter:v "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)',pad=512:512:(512-iw)/2:(512-ih)/2:color=white@0" -loop 0 -preset default -an -vsync 0 -s 512:512 -t 5 -y ${outputPath}`;
+
+                            const ffmpegCmd = `ffmpeg -i ${inputPath} -vcodec libwebp -filter:v "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)',pad=512:512:(512-iw)/2:(512-ih)/2:color=white@0" -loop 0 -preset default -an -vsync 0 -s 512:512 -t 5 -y ${outputPath}`;
 
                             exec(ffmpegCmd, async (err) => {
                                 if (err) {
@@ -171,7 +195,7 @@ async function connectToWhatsApp() {
                             await sock.sendMessage(from, { text: '❌ Terjadi kesalahan saat membuat stiker.' });
                         }
                     } else {
-                        await sock.sendMessage(from, { text: 'Silakan kirim gambar/video dengan caption .s atau balas gambar/video dengan .s' });
+                        await sock.sendMessage(from, { text: 'Silakan kirim foto dengan caption .s (bisa + teks) atau balas foto/video dengan .s' });
                     }
                     break;
 
@@ -259,6 +283,47 @@ async function downloadMedia(message, type) {
         return buffer;
     } catch (e) {
         throw e;
+    }
+}
+
+function escapeDrawText(text) {
+    return text
+        .replace(/\\/g, '\\\\')
+        .replace(/:/g, '\\:')
+        .replace(/'/g, '’')
+        .replace(/"/g, '')
+        .replace(/\r/g, '')
+        .replace(/\n/g, '\\n')
+        .slice(0, 120);
+}
+
+async function createStickerWithText(sock, from, mediaMsg, text, quotedMsg) {
+    await sock.sendMessage(from, { text: '_Sedang membuat stiker..._' });
+    try {
+        const buffer = await downloadMedia(mediaMsg, 'image');
+
+        const inputPath = path.join(__dirname, `tmp/input_${Date.now()}.jpg`);
+        const outputPath = path.join(__dirname, `tmp/output_${Date.now()}.webp`);
+
+        if (!fs.existsSync(path.join(__dirname, 'tmp'))) fs.mkdirSync(path.join(__dirname, 'tmp'));
+        fs.writeFileSync(inputPath, buffer);
+
+        const escapedText = escapeDrawText(text);
+        const ffmpegCmd = `ffmpeg -i ${inputPath} -vcodec libwebp -filter:v "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)',pad=512:512:(512-iw)/2:(512-ih)/2:color=white@0,drawbox=x=0:y=ih-90:w=iw:h=90:color=black@0.65:t=fill,drawtext=fontfile='C\\:/Windows/Fonts/Arial.ttf':text='${escapedText}':fontsize=30:fontcolor=white:line_spacing=4:x=(w-text_w)/2:y=h-63:expansion=none" -y ${outputPath}`;
+
+        exec(ffmpegCmd, async (err) => {
+            if (err) {
+                console.error('FFmpeg Error:', err);
+                await sock.sendMessage(from, { text: '❌ Gagal membuat stiker.' });
+            } else {
+                await sock.sendMessage(from, { sticker: fs.readFileSync(outputPath) }, { quoted: quotedMsg });
+            }
+            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+            if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+        });
+    } catch (e) {
+        console.error('Sticker Text Error:', e);
+        await sock.sendMessage(from, { text: '❌ Terjadi kesalahan saat membuat stiker.' });
     }
 }
 
