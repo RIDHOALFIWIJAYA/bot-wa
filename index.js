@@ -132,7 +132,7 @@ async function connectToWhatsApp() {
         if (isCommand) {
             switch (command) {
                 case 'menu':
-                    const menuText = `*🤖 WA-GROQ SUPER BOT*
+                    const menuText = `*WA cuyBOT*
 
 *Tahap A (AI & Search):*
 - *Kirim Foto + Caption* : Analisis Gambar.
