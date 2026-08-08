@@ -125,7 +125,26 @@ async function connectToWhatsApp() {
                 const pending = pendingSticker.get(from);
                 clearTimeout(pending.timer);
                 pendingSticker.delete(from);
-                return createStickerWithText(sock, from, pending.mediaMsg, body, pending.msg);
+                if (pending.mode === 'choice') {
+                    const choice = body.trim();
+                    if (choice === '1') {
+                        return createPlainSticker(sock, from, pending.mediaMsg, pending.msg);
+                    } else if (choice === '2') {
+                        await sock.sendMessage(from, { text: '_✍️ Ketik teks yang mau ditambahkan ke stiker (60 detik)._' });
+                        if (pendingSticker.has(from)) clearTimeout(pendingSticker.get(from).timer);
+                        const timer = setTimeout(() => {
+                            if (pendingSticker.has(from)) {
+                                pendingSticker.delete(from);
+                                sock.sendMessage(from, { text: '⏰ Waktu habis. Stiker batal.' }).catch(() => {});
+                            }
+                        }, 60000);
+                        pendingSticker.set(from, { mediaMsg: pending.mediaMsg, msg: pending.msg, mode: 'text', timer });
+                    } else {
+                        await sock.sendMessage(from, { text: 'Pilihan tidak valid. Balas *1* untuk Stiker Polos atau *2* untuk Stiker dengan Teks.' });
+                    }
+                } else {
+                    return createStickerWithText(sock, from, pending.mediaMsg, body, pending.msg);
+                }
             }
         }
 
@@ -140,7 +159,7 @@ async function connectToWhatsApp() {
 - *.search [kueri]* : Cari info terbaru.
 
 *Tahap B (Utility):*
-- *.s / .sticker* : Stiker dari foto (bisa + teks) / video.
+- *.s / .sticker* : Stiker dari foto (polos / +teks) / video.
 - *.remind [HH:mm] [pesan]* : Pengingat.
 - *Kirim Link TikTok* : Auto Download Video.
 
@@ -157,7 +176,7 @@ async function connectToWhatsApp() {
 
                     if (isImage || isQuotedImage) {
                         const mediaMsg = isQuotedImage ? quoted.imageMessage : msg.message.imageMessage;
-                        await sock.sendMessage(from, { text: '_✍️ Ketik teks yang mau ditambahkan ke stiker (60 detik)._' });
+                        await sock.sendMessage(from, { text: 'Pilih opsi stiker:\n1️⃣ *Stiker Polos* (tanpa teks)\n2️⃣ *Stiker dengan Teks*\n\nBalas *1* atau *2* (60 detik).' });
                         if (pendingSticker.has(from)) clearTimeout(pendingSticker.get(from).timer);
                         const timer = setTimeout(() => {
                             if (pendingSticker.has(from)) {
@@ -165,7 +184,7 @@ async function connectToWhatsApp() {
                                 sock.sendMessage(from, { text: '⏰ Waktu habis. Stiker batal.' }).catch(() => {});
                             }
                         }, 60000);
-                        pendingSticker.set(from, { mediaMsg, msg, timer });
+                        pendingSticker.set(from, { mediaMsg, msg, mode: 'choice', timer });
                     } else if (isVideo || isQuotedVideo) {
                         await sock.sendMessage(from, { text: '_Sedang memproses stiker..._' });
                         try {
@@ -323,6 +342,35 @@ async function createStickerWithText(sock, from, mediaMsg, text, quotedMsg) {
         });
     } catch (e) {
         console.error('Sticker Text Error:', e);
+        await sock.sendMessage(from, { text: '❌ Terjadi kesalahan saat membuat stiker.' });
+    }
+}
+
+async function createPlainSticker(sock, from, mediaMsg, quotedMsg) {
+    await sock.sendMessage(from, { text: '_Sedang membuat stiker..._' });
+    try {
+        const buffer = await downloadMedia(mediaMsg, 'image');
+
+        const inputPath = path.join(__dirname, `tmp/input_${Date.now()}.jpg`);
+        const outputPath = path.join(__dirname, `tmp/output_${Date.now()}.webp`);
+
+        if (!fs.existsSync(path.join(__dirname, 'tmp'))) fs.mkdirSync(path.join(__dirname, 'tmp'));
+        fs.writeFileSync(inputPath, buffer);
+
+        const ffmpegCmd = `ffmpeg -i ${inputPath} -vcodec libwebp -filter:v "scale='if(gt(iw,ih),512,-1)':'if(gt(iw,ih),-1,512)',pad=512:512:(512-iw)/2:(512-ih)/2:color=white@0" -y ${outputPath}`;
+
+        exec(ffmpegCmd, async (err) => {
+            if (err) {
+                console.error('FFmpeg Error:', err);
+                await sock.sendMessage(from, { text: '❌ Gagal membuat stiker.' });
+            } else {
+                await sock.sendMessage(from, { sticker: fs.readFileSync(outputPath) }, { quoted: quotedMsg });
+            }
+            if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+            if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+        });
+    } catch (e) {
+        console.error('Sticker Error:', e);
         await sock.sendMessage(from, { text: '❌ Terjadi kesalahan saat membuat stiker.' });
     }
 }
