@@ -1,9 +1,9 @@
-# 🤖 WA-Groq Super Bot
+# cuyBOT WA
 
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://opensource.org/licenses/ISC)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D16.0.0-green.svg)](https://nodejs.org/)
 
-**WA-Groq Super Bot** adalah bot WhatsApp pintar yang mengintegrasikan AI canggih dari **Groq SDK** (Llama 3) dengan fitur utilitas harian. Bot ini dibangun menggunakan library `@whiskeysockets/baileys` yang efisien dan cepat.
+**cuyBOT WA** adalah bot WhatsApp pintar yang mengintegrasikan AI canggih dari **Groq SDK** (Llama 3) dengan fitur utilitas harian. Bot ini dibangun menggunakan library `@whiskeysockets/baileys` yang efisien dan cepat.
 
 ---
 
