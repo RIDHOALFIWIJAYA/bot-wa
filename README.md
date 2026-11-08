@@ -2,6 +2,7 @@
 
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](https://opensource.org/licenses/ISC)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-green.svg)](https://nodejs.org/)
+[![CI](https://github.com/RIDHOALFIWIJAYA/bot-wa/actions/workflows/ci.yml/badge.svg)](https://github.com/RIDHOALFIWIJAYA/bot-wa/actions/workflows/ci.yml)
 
 **cuyBOT WA** adalah bot WhatsApp pintar yang mengintegrasikan AI canggih dari **Groq SDK** dengan fitur utilitas harian. Bot ini dibangun menggunakan library `@whiskeysockets/baileys` yang efisien dan cepat.
 
@@ -60,6 +61,13 @@ YTDLP_COOKIES=
 npm start
 ```
 Scan kode QR yang muncul di terminal menggunakan WhatsApp di ponsel Anda (**Linked Devices**).
+
+### 6. Test & Pemeriksaan
+```bash
+npm run check
+npm test
+```
+`npm run check` memeriksa sintaks, sedangkan `npm test` menjalankan unit test bawaan Node.js. Keduanya juga dijalankan otomatis lewat GitHub Actions.
 
 ---
 
