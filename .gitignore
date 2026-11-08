@@ -4,7 +4,7 @@ auth_info_baileys/
 tmp/
 *.log
 memory.json
-reminder.json
+reminders.json
 ffmpeg.exe
 ffplay.exe
 ffprobe.exe

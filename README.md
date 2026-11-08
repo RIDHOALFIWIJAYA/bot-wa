@@ -22,8 +22,9 @@
 
 ### 1. Prasyarat
 Pastikan Anda sudah menginstal:
-- [Node.js](https://nodejs.org/) (Versi 16 atau lebih tinggi)
+- [Node.js](https://nodejs.org/) (Versi 20 atau lebih tinggi)
 - NPM (Biasanya terinstal bersama Node.js)
+- [FFmpeg](https://ffmpeg.org/) (dibutuhkan untuk fitur stiker). Cek dengan `ffmpeg -version`.
 
 ### 2. Clone Repository
 ```bash
@@ -40,9 +41,11 @@ npm install
 Buat file `.env` di direktori utama dan tambahkan API Key Groq Anda:
 ```env
 GROQ_API_KEY=gsk_your_api_key_here
-MODEL_NAME=llama3-8b-8192
+MODEL_NAME=openai/gpt-oss-120b
 ```
 *Dapatkan API Key di [Groq Cloud Console](https://console.groq.com/).*
+
+> `memory.json`, `reminders.json`, dan folder `auth_info_baileys/` dibuat otomatis saat bot berjalan. Jangan commit file tersebut karena berisi data chat, pengingat, dan sesi login.
 
 ### 5. Jalankan Bot
 ```bash
@@ -71,6 +74,8 @@ Scan kode QR yang muncul di terminal menggunakan WhatsApp di ponsel Anda (**Link
 - `node-cron`: Penjadwalan tugas (untuk pengingat).
 - `axios`: HTTP client untuk downloader.
 - `qrcode-terminal`: Menampilkan QR code di terminal.
+- `@hapi/boom`: Penanganan error koneksi Baileys.
+- `pino`: Logger untuk Baileys.
 
 ---
 
