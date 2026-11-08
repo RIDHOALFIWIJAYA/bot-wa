@@ -14,7 +14,8 @@ const axios = require('axios');
 const cron = require('node-cron');
 const { execFile } = require('child_process');
 const path = require('path');
-require('dotenv').config();
+const os = require('os');
+require('dotenv').config({ quiet: true });
 
 // Inisialisasi Groq
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -101,6 +102,11 @@ setInterval(() => {
         }
     }
 }, 10 * 60 * 1000).unref();
+
+// Cache hasil pencarian
+const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000;
+const SEARCH_CACHE_MAX = 100;
+const searchCache = new Map();
 
 const saveMemory = () => fs.writeFileSync(MEMORY_FILE, JSON.stringify(chatMemory, null, 2));
 const saveReminders = () => fs.writeFileSync(REMINDERS_FILE, JSON.stringify(reminders, null, 2));
@@ -204,8 +210,9 @@ async function connectToWhatsApp() {
         }
 
         // Auto Downloader Detection
-        if (body.match(/tiktok\.com/i)) {
-            return handleDownloader(sock, from, body, msg);
+        const mediaUrl = extractSupportedUrl(body);
+        if (mediaUrl) {
+            return handleDownloader(sock, from, mediaUrl, msg);
         }
 
         const cleanBody = isGroup && isMentioned ? body.replace(/@\d+/g, '').trim() : body;
@@ -249,13 +256,13 @@ async function connectToWhatsApp() {
 
 *Tahap A (AI & Search):*
 - *Kirim Foto + Caption* : Analisis Gambar.
-- *Chat Biasa* : AI Llama 3 (Memory ON).
-- *.search [kueri]* : Cari info terbaru.
+- *Chat Biasa* : AI (Memory ON).
+- *.search [kueri]* : Cari info terbaru + sumber.
 
 *Tahap B (Utility):*
 - *.s / .sticker* : Stiker dari foto (polos / +teks) / video.
 - *.remind [HH:mm] [pesan]* : Pengingat.
-- *Kirim Link TikTok* : Auto Download Video.
+- *.dl [url]* / *Kirim Link* : Download TikTok, Instagram, YouTube.
 
 *Others:*
 - *.reset* : Hapus memori chat.
@@ -341,6 +348,16 @@ async function connectToWhatsApp() {
                     await sock.sendMessage(from, { text: sRes }, { quoted: msg });
                     break;
                 }
+
+                case 'dl': {
+                    const urlArg = args.find((arg) => /https?:\/\//i.test(arg)) || args.join(' ').trim();
+                    const downloadUrl = extractSupportedUrl(urlArg);
+                    if (!downloadUrl) {
+                        return sock.sendMessage(from, { text: 'Format: .dl [url]\nSupport: TikTok, Instagram, YouTube.' }, { quoted: msg });
+                    }
+                    await handleDownloader(sock, from, downloadUrl, msg);
+                    break;
+                }
                 
                 case 'reset':
                     chatMemory[from] = []; saveMemory();
@@ -355,7 +372,8 @@ async function connectToWhatsApp() {
             if (isImage) {
                 await sock.sendMessage(from, { text: '_Menganalisis gambar..._' });
                 const imageBuffer = await downloadMedia(msg.message.imageMessage, 'image');
-                const visionRes = await getGroqVisionResponse(from, cleanBody || 'Apa ini?', imageBuffer.toString('base64'));
+                const image = await prepareVisionImage(imageBuffer, msg.message.imageMessage.mimetype);
+                const visionRes = await getGroqVisionResponse(from, cleanBody || 'Apa ini?', image.base64, image.mime);
                 await sock.sendMessage(from, { text: visionRes }, { quoted: msg });
             } else if (cleanBody) {
                 const needsSearch = /kapan|berita|siapa|skor|harga|terbaru|hari ini/i.test(cleanBody);
@@ -401,22 +419,129 @@ function startReminderCron(sock) {
 }
 
 // --- Downloader Logic ---
-async function handleDownloader(sock, from, url, msg) {
+const SUPPORTED_HOSTS = [
+    'tiktok.com',
+    'instagram.com',
+    'instagr.am',
+    'youtube.com',
+    'youtu.be'
+];
+
+function extractSupportedUrl(text) {
+    const match = String(text || '').match(/https?:\/\/[^\s<>]+/i);
+    if (!match) return null;
     try {
-        await sock.sendMessage(from, { text: '_Mendeteksi link, sedang mengunduh..._' });
-        const res = await axios.get(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`);
-        const videoUrl = res.data.data?.play || res.data.data?.wmplay;
-        
-        if (videoUrl) {
-            await sock.sendMessage(from, { 
-                video: { url: videoUrl }, 
-                caption: '✅ Berhasil diunduh!' 
-            }, { quoted: msg });
-        } else {
-            throw new Error('Video tidak ditemukan.');
-        }
+        const url = new URL(match[0].replace(/[)\].,!?;:'"]+$/, ''));
+        const host = url.hostname.toLowerCase().replace(/^www\./, '');
+        const supported = SUPPORTED_HOSTS.some((domain) => host === domain || host.endsWith(`.${domain}`));
+        return supported ? url.toString() : null;
     } catch (e) {
-        await sock.sendMessage(from, { text: `❌ Gagal download: ${e.message}` });
+        return null;
+    }
+}
+
+function getYtDlpCommand() {
+    if (process.env.YTDLP_PATH) return process.env.YTDLP_PATH;
+    const localBin = path.join(os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+    if (fs.existsSync(localBin)) return localBin;
+    return 'yt-dlp';
+}
+
+function execYtDlp(args) {
+    return new Promise((resolve, reject) => {
+        const options = { timeout: 120000, maxBuffer: 10 * 1024 * 1024 };
+        execFile(getYtDlpCommand(), args, options, (err, stdout, stderr) => {
+            if (!err) return resolve({ stdout, stderr });
+            if (err.code === 'ENOENT') {
+                execFile(
+                    process.platform === 'win32' ? 'python' : 'python3',
+                    ['-m', 'yt_dlp', ...args],
+                    options,
+                    (fallbackErr, fallbackStdout, fallbackStderr) => {
+                        if (fallbackErr) return reject(new Error(fallbackStderr || fallbackErr.message));
+                        resolve({ stdout: fallbackStdout, stderr: fallbackStderr });
+                    }
+                );
+                return;
+            }
+            reject(new Error(stderr || err.message));
+        });
+    });
+}
+
+async function downloadWithYtDlp(url) {
+    const tmpDir = ensureTmpDir();
+    const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const prefix = `dl_${stamp}`;
+    const outputTemplate = path.join(tmpDir, `${prefix}.%(ext)s`);
+
+    const args = [
+        '--no-playlist',
+        '--js-runtimes', 'node',
+        '--max-filesize', '64M',
+        '-f', 'best[ext=mp4]/best',
+        '--merge-output-format', 'mp4',
+        '--print', 'after_move:filepath',
+        '-o', outputTemplate
+    ];
+
+    const cookiesPath = process.env.YTDLP_COOKIES;
+    if (cookiesPath && fs.existsSync(cookiesPath)) {
+        args.push('--cookies', cookiesPath);
+    }
+    args.push(url);
+
+    try {
+        const { stdout } = await execYtDlp(args);
+        const lines = String(stdout || '').trim().split(/\r?\n/).filter(Boolean);
+        const filePath = lines[lines.length - 1];
+        if (!filePath || !fs.existsSync(filePath)) {
+            throw new Error('File hasil unduhan tidak ditemukan.');
+        }
+        return filePath;
+    } catch (e) {
+        for (const file of fs.readdirSync(tmpDir)) {
+            if (file.startsWith(prefix)) {
+                try { fs.unlinkSync(path.join(tmpDir, file)); } catch (cleanupError) {}
+            }
+        }
+        throw e;
+    }
+}
+
+async function handleDownloader(sock, from, url, msg) {
+    await sock.sendMessage(from, { text: '_Mendeteksi link, sedang mengunduh..._' });
+    let filePath = null;
+
+    try {
+        filePath = await downloadWithYtDlp(url);
+        const size = fs.statSync(filePath).size;
+        if (size > 64 * 1024 * 1024) throw new Error('Ukuran file melebihi 64MB.');
+        await sock.sendMessage(from, {
+            video: fs.readFileSync(filePath),
+            caption: '✅ Berhasil diunduh!'
+        }, { quoted: msg });
+    } catch (e) {
+        const reason = /ENOENT/.test(e.message)
+            ? 'yt-dlp belum terpasang. Jalankan: pip3 install --user yt-dlp'
+            : e.message;
+        console.error('Downloader Error:', reason);
+
+        if (/tiktok\.com/i.test(url)) {
+            try {
+                const res = await axios.get(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`, { timeout: 15000 });
+                const videoUrl = res.data?.data?.play || res.data?.data?.wmplay;
+                if (!videoUrl) throw new Error('Video tidak ditemukan.');
+                await sock.sendMessage(from, { video: { url: videoUrl }, caption: '✅ Berhasil diunduh!' }, { quoted: msg });
+                return;
+            } catch (fallbackError) {
+                console.error('TikWM fallback error:', fallbackError.message);
+            }
+        }
+
+        await sock.sendMessage(from, { text: `❌ Gagal download: ${reason}` });
+    } finally {
+        if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
     }
 }
 
@@ -432,6 +557,12 @@ async function downloadMedia(message, type) {
     }
 }
 
+function ensureTmpDir() {
+    const tmpDir = path.join(__dirname, 'tmp');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir);
+    return tmpDir;
+}
+
 function runFfmpeg(args) {
     return new Promise((resolve, reject) => {
         execFile('ffmpeg', ['-nostdin', ...args], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
@@ -439,6 +570,37 @@ function runFfmpeg(args) {
             else resolve();
         });
     });
+}
+
+async function prepareVisionImage(buffer, mimetype) {
+    const tmpDir = ensureTmpDir();
+    const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const inputPath = path.join(tmpDir, `vision_input_${stamp}`);
+    const outputPath = path.join(tmpDir, `vision_output_${stamp}.jpg`);
+
+    fs.writeFileSync(inputPath, buffer);
+    try {
+        await runFfmpeg([
+            '-i', inputPath,
+            '-vf', "scale=w='min(1024,iw)':h='min(1024,ih)':force_original_aspect_ratio=decrease",
+            '-frames:v', '1',
+            '-q:v', '3',
+            '-y', outputPath
+        ]);
+        return {
+            base64: fs.readFileSync(outputPath).toString('base64'),
+            mime: 'image/jpeg'
+        };
+    } catch (e) {
+        console.error('Vision convert error:', e.message);
+        return {
+            base64: buffer.toString('base64'),
+            mime: mimetype || 'image/jpeg'
+        };
+    } finally {
+        if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+    }
 }
 
 function getFontFile() {
@@ -538,37 +700,174 @@ async function getGroqResponse(userId, text) {
     }
 }
 
-async function getGroqVisionResponse(userId, text, base64Image) {
+async function getGroqVisionResponse(userId, text, base64Image, imageMime = 'image/jpeg') {
     try {
         const res = await groq.chat.completions.create({
             messages: [{ 
                 role: 'user', 
                 content: [
                     { type: 'text', text: text }, 
-                    { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
+                    { type: 'image_url', image_url: { url: `data:${imageMime};base64,${base64Image}` } }
                 ] 
             }],
-            model: 'qwen/qwen3.8-27b'
+            model: process.env.VISION_MODEL || 'qwen/qwen3.8-27b'
         });
         const reply = res.choices[0].message.content;
         addMessageToHistory(userId, 'user', `[Gambar]: ${text}`);
         addMessageToHistory(userId, 'assistant', reply);
         return reply;
-    } catch (e) { 
-        return `❌ Gagal analisis gambar: ${e.message}`; 
+    } catch (e) {
+        const message = e?.message || 'unknown';
+        if (/at least 32 pixels/i.test(message)) return '❌ Gambar terlalu kecil (minimal 32x32 piksel).';
+        if (/invalid image data/i.test(message)) return '❌ Format gambar tidak didukung. Coba kirim ulang sebagai JPG/PNG.';
+        return `❌ Gagal analisis gambar: ${message}`;
     }
 }
 
+function normalizeSearchResults(items) {
+    return (items || [])
+        .map((item) => ({
+            title: String(item?.title || item?.name || '').trim(),
+            url: String(item?.url || item?.link || '').trim(),
+            snippet: String(item?.content || item?.snippet || item?.description || '').trim()
+        }))
+        .filter((item) => item.url);
+}
+
+function getCachedSearch(query) {
+    const key = query.trim().toLowerCase();
+    const cached = searchCache.get(key);
+    if (!cached) return null;
+    if (Date.now() - cached.createdAt > SEARCH_CACHE_TTL_MS) {
+        searchCache.delete(key);
+        return null;
+    }
+    return cached.results;
+}
+
+function cacheSearch(query, results) {
+    const key = query.trim().toLowerCase();
+    if (searchCache.size >= SEARCH_CACHE_MAX) {
+        const oldestKey = searchCache.keys().next().value;
+        searchCache.delete(oldestKey);
+    }
+    searchCache.set(key, { results, createdAt: Date.now() });
+}
+
+async function searchTavily(query) {
+    const apiKey = process.env.SEARCH_API_KEY;
+    if (!apiKey) throw new Error('SEARCH_API_KEY belum diisi.');
+
+    const res = await axios.post('https://api.tavily.com/search', {
+        api_key: apiKey,
+        query,
+        search_depth: 'basic',
+        max_results: 5,
+        include_answer: false
+    }, { timeout: 10000 });
+
+    return normalizeSearchResults(res.data?.results);
+}
+
+async function searchDuckDuckGo(query) {
+    const res = await axios.get('https://api.duckduckgo.com/', {
+        params: { q: query, format: 'json', no_html: 1, skip_disambig: 1 },
+        timeout: 10000
+    });
+    const data = res.data || {};
+    const results = [];
+
+    if (data.AbstractText) {
+        results.push({
+            title: data.Heading || query,
+            url: data.AbstractURL || `https://duckduckgo.com/?q=${encodeURIComponent(query)}`,
+            snippet: data.AbstractText
+        });
+    }
+
+    for (const topic of data.RelatedTopics || []) {
+        const items = Array.isArray(topic.Topics) ? topic.Topics : [topic];
+        for (const item of items) {
+            if (item.FirstURL && item.Text) {
+                results.push({
+                    title: item.Text.split(' - ')[0],
+                    url: item.FirstURL,
+                    snippet: item.Text
+                });
+            }
+        }
+    }
+
+    return normalizeSearchResults(results).slice(0, 5);
+}
+
+async function performSearch(query) {
+    const cached = getCachedSearch(query);
+    if (cached) return cached;
+
+    const provider = (process.env.SEARCH_PROVIDER || 'tavily').toLowerCase();
+    let results = [];
+    let lastError = null;
+
+    if (provider === 'tavily' && process.env.SEARCH_API_KEY) {
+        try {
+            results = await searchTavily(query);
+        } catch (e) {
+            lastError = e;
+        }
+    }
+
+    if (results.length === 0) {
+        try {
+            results = await searchDuckDuckGo(query);
+        } catch (e) {
+            lastError = lastError || e;
+        }
+    }
+
+    if (results.length === 0 && lastError) {
+        console.error('Search Error:', lastError.message);
+    }
+
+    if (results.length > 0) cacheSearch(query, results);
+    return results;
+}
+
 async function getWebSearchResponse(userId, query) {
+    const results = await performSearch(query);
+
+    if (results.length === 0) {
+        const message = `Tidak ditemukan hasil untuk *${query}*. Coba kata kunci lain.`;
+        addMessageToHistory(userId, 'user', query);
+        addMessageToHistory(userId, 'assistant', message);
+        return message;
+    }
+
+    const context = results
+        .map((result, index) => `[${index + 1}] ${result.title}\nURL: ${result.url}\n${result.snippet}`)
+        .join('\n\n');
+
     try {
-        const res = await axios.get(`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json`);
-        const snippet = res.data.AbstractText || "Cari info terbaru...";
-        const finalRes = await groq.chat.completions.create({
-            messages: [{ role: 'user', content: `Data: ${snippet}\n\nJawab: ${query}` }],
+        const res = await groq.chat.completions.create({
+            messages: [
+                { role: 'system', content: 'Jawab dalam bahasa Indonesia. Gunakan data hasil pencarian berikut. Sertakan sitasi [1], [2] sesuai sumber. Jika data tidak cukup, katakan apa adanya.' },
+                { role: 'user', content: `Pertanyaan: ${query}\n\nHasil pencarian:\n${context}` }
+            ],
             model: process.env.MODEL_NAME || 'openai/gpt-oss-120b'
         });
-        return finalRes.choices[0].message.content;
-    } catch (e) { return 'Gagal search.'; }
+        const reply = res.choices[0].message.content.trim();
+        const sources = results.map((result, index) => `[${index + 1}] ${result.url}`).join('\n');
+        const message = `${reply}\n\n*Sumber:*\n${sources}`;
+        addMessageToHistory(userId, 'user', query);
+        addMessageToHistory(userId, 'assistant', message);
+        return message;
+    } catch (e) {
+        console.error('Search summarization error:', e.message);
+        const fallback = results
+            .map((result, index) => `[${index + 1}] ${result.title}\n${result.url}\n${result.snippet}`)
+            .join('\n\n');
+        return `Ringkasan AI gagal, ini hasil mentahnya:\n\n${fallback}`;
+    }
 }
 
 process.on('unhandledRejection', (reason) => {
